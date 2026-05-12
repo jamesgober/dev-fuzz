@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 
 on:
   push:
@@ -19,6 +19,8 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
+      - name: Check out sibling crates (path deps)
+        run: git clone --depth 1 https://github.com/jamesgober/dev-report.git ../dev-report
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
@@ -40,6 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Check out sibling crates (path deps)
+        run: git clone --depth 1 https://github.com/jamesgober/dev-report.git ../dev-report
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -66,6 +70,8 @@ jobs:
       RUSTDOCFLAGS: "-D warnings"
     steps:
       - uses: actions/checkout@v5
+      - name: Check out sibling crates (path deps)
+        run: git clone --depth 1 https://github.com/jamesgober/dev-report.git ../dev-report
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo doc --all-features --no-deps
@@ -75,6 +81,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Check out sibling crates (path deps)
+        run: git clone --depth 1 https://github.com/jamesgober/dev-report.git ../dev-report
       - uses: dtolnay/rust-toolchain@1.85
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --all-features --verbose
+
+  # Sanity check: cargo-fuzz + nightly install cleanly and dev-fuzz
+  # compiles against them. The full subprocess pipeline is NOT driven
+  # here — running `cargo fuzz` from inside `cargo test` deadlocks on
+  # the workspace target-dir lock the same way `cargo llvm-cov` does
+  # (see dev-coverage). The libFuzzer stderr parser is covered by
+  # fixture-based unit tests in `src/runner.rs`.
+  integration:
+    name: Integration (cargo-fuzz sanity)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Check out sibling crates (path deps)
+        run: git clone --depth 1 https://github.com/jamesgober/dev-report.git ../dev-report
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install nightly toolchain (required by libFuzzer)
+        uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-fuzz
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - name: Verify tool installed
+        run: |
+          cargo fuzz --version
+          cargo +nightly --version
+      - name: Build dev-fuzz against installed toolchain
+        run: cargo build --release --verbose
