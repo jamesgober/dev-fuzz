@@ -10,8 +10,9 @@
 //! ```
 //!
 //! Timeout / OOM variants use `SUMMARY: libFuzzer: timeout` and
-//! `SUMMARY: libFuzzer: out-of-memory` respectively. The "Test unit
-//! written to <path>" line is the reproducer path we surface.
+//! `SUMMARY: libFuzzer: out-of-memory` respectively. The
+//! `Test unit written to ...` line gives the reproducer path we
+//! surface.
 //!
 //! Execution counts come from libFuzzer's periodic status lines:
 //! `#1234567` style entries; we take the highest seen as the
