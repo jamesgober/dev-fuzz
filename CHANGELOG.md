@@ -7,24 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.9.2] - 2026-05-18
+## [0.9.2] - 2026-10-09
 
-MSRV rollback to Rust 1.75. Backed off from 1.85 after `dev-fixtures`
-swapped `tempfile` → `mod-tempdir` 1.0 in its own 0.9.5 release,
-eliminating the `getrandom 0.4.2 → edition2024` chain that was the
-sole reason the dev-* collection sat at 1.85. No code changes here;
-this crate's own runtime dependencies have always been
-1.75-compatible.
+Finding-detection fixes from a review pass, a hard run time limit, and
+the MSRV rollback to Rust 1.75. The rollback follows `dev-fixtures`
+0.9.5 swapping `tempfile` for `mod-tempdir` 1.0, which removed the
+`getrandom 0.4.2 -> edition2024` chain that held the dev-* collection
+at 1.85.
+
+### Added
+
+- `FuzzRun::run_timeout(Duration)`, a hard wall-clock limit on the
+  whole run. The time budget does not cover the build or one slow input
+  (libFuzzer's default per-input timeout is 1200 s). On expiry the
+  process tree is killed and findings already written are kept.
+- `VERSION` constant with the crate version as compiled, so tools that
+  bundle this crate can report what is actually linked.
+
+### Fixed
+
+- Sanitizer reports (`SUMMARY: AddressSanitizer: ...`, LeakSanitizer
+  and the rest) were not recognized. An ASan crash came back as
+  `SubprocessFailed` with no reproducer; it is now a Crash finding, and
+  `leak-*` artifacts are handled.
+- Reproducers were searched only 10 lines forward and 20 lines back, so
+  a timeout artifact printed before a deep stack trace came out as
+  "unknown reproducer". The search now covers everything between
+  neighbouring `SUMMARY` lines and prefers an artifact whose prefix
+  matches the finding kind. An artifact with no `SUMMARY` line
+  (truncated output) still becomes a finding.
+- Rust panics were summarized as "deadly signal"; the panic message is
+  used now.
+- Indented stack frames (`#35 0x...`) were counted as executions.
+  Status lines must start in column 0, and `Done N runs` and
+  `stat::number_of_executed_units` are read too.
+- A crash on an allow-listed input made `execute()` return
+  `SubprocessFailed`, so the allow-list was useless for crashes.
+- Nightly detection accepted any toolchain whose name starts with
+  `nightly`, including dated ones that `cargo +nightly` cannot use. It
+  now probes `cargo +nightly --version` with `RUSTUP_AUTO_INSTALL=0`, so
+  nothing is downloaded. Tool detection only treats cargo's "no such
+  command" error as not installed, and a missing work dir gives a clear
+  error.
+- The unknown-reproducer placeholder was attached as a file reference,
+  which ended up in SARIF output. Execution counts above `i64::MAX` went
+  negative in evidence. Allow-list matching now handles `\` paths on
+  any host.
 
 ### Changed
 
-- `rust-version` lowered from `1.85` to `1.75` in `Cargo.toml`.
-- MSRV badge in README updated from `1.85+` to `1.75+`.
+- Subprocess error details carry the last 60 lines of stderr instead of
+  the whole log.
+- `rust-version` lowered from `1.85` to `1.75`. CI's MSRV job now
+  builds on 1.75 against an MSRV-compatible lockfile; it was still
+  pinned to 1.85.
 
-### Notes
+### Documentation
 
-- No code change. No API change. No new dependencies.
-- Library, examples, and tests all build clean on Rust 1.75 (verified).
+- New README sections on what gets detected, budgets versus hangs, how
+  a missing tool or nightly is detected, and the reproducer
+  placeholder. MSRV section says 1.75.
+- `docs/API.md`: builder table and error conditions.
 
 [0.9.2]: https://github.com/jamesgober/dev-fuzz/releases/tag/v0.9.2
 

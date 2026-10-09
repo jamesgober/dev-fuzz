@@ -60,8 +60,12 @@ fn smoke_timeout_produces_warning() {
         }],
     };
     let report = r.into_report();
-    // Warn verdict (not Fail) — timeout severity is Warning.
-    assert!(report.failed() || report.warned());
+    // Fail verdict carrying Warning severity (see the README severity table).
+    assert!(report.failed());
+    assert_eq!(
+        report.checks[0].severity,
+        Some(dev_report::Severity::Warning)
+    );
 }
 
 #[test]

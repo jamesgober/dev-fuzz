@@ -134,6 +134,17 @@ pub fn fuzz_budget(&self) -> FuzzBudget
 
 Return the configured budget.
 
+### Other builder methods
+
+| Method                            | Effect                                                              |
+|-----------------------------------|---------------------------------------------------------------------|
+| `in_dir(dir)`                     | Run `cargo fuzz` from `dir`.                                         |
+| `sanitizer(Sanitizer)`            | `--sanitizer address/leak/memory/thread/none` (default `address`).  |
+| `timeout_per_iter(d)`             | libFuzzer `-timeout=<secs>` (whole seconds, at least 1).            |
+| `rss_limit_mb(n)`                 | libFuzzer `-rss_limit_mb=<n>`.                                      |
+| `allow(name)` / `allow_all(iter)` | Drop findings whose reproducer file name matches exactly.           |
+| `run_timeout(d)`                  | Kill the whole run (build included) after `d`.                      |
+
 ### `FuzzRun::execute`
 
 ```rust
@@ -145,7 +156,10 @@ Run the fuzz target. Returns:
 - `Err(FuzzError::ToolNotInstalled)` if `cargo-fuzz` is missing.
 - `Err(FuzzError::NightlyRequired)` if nightly Rust is unavailable.
 - `Err(FuzzError::TargetNotFound)` if the named target doesn't exist.
-- `Err(FuzzError::SubprocessFailed)` for other subprocess failures.
+- `Err(FuzzError::SubprocessFailed)` when the working directory is
+  missing, `cargo fuzz` exits non-zero without a recognizable finding
+  (for example a build error), or `run_timeout` expires before any
+  finding was written.
 
 ---
 
@@ -159,9 +173,11 @@ pub struct FuzzFinding {
 }
 ```
 
-A single finding. Every finding MUST have a `reproducer_path`
-pointing at the input that triggered it, so the issue can be
-replayed and debugged.
+A single finding. `reproducer_path` points at the input that
+triggered it, so the issue can be replayed and debugged. When
+libFuzzer's output names no artifact for the finding it holds a
+placeholder that starts with `<` (for example
+`<unknown reproducer for crash>`).
 
 ---
 

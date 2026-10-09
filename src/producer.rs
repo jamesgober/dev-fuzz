@@ -71,15 +71,37 @@ impl Producer for FuzzProducer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dev_report::Verdict;
 
     #[test]
-    fn produce_returns_report_when_tool_missing() {
-        // Default runner image won't have cargo-fuzz + nightly installed
-        // alongside a fuzz target; the producer should surface that as
-        // a failing CheckResult rather than panicking.
-        let producer = FuzzProducer::new(FuzzRun::new("nonexistent_target", "0.0.0"));
+    fn produce_maps_run_failure_to_critical_fail() {
+        // An empty directory has no fuzz/ project, so the run fails fast
+        // whichever prerequisite is missing first (cargo-fuzz, nightly,
+        // or the target itself).
+        let dir = tempfile::tempdir().unwrap();
+        let producer =
+            FuzzProducer::new(FuzzRun::new("nonexistent_target", "0.0.0").in_dir(dir.path()));
         let report = producer.produce();
         assert_eq!(report.subject, "nonexistent_target");
-        assert!(!report.checks.is_empty());
+        assert_eq!(report.checks.len(), 1);
+        let check = &report.checks[0];
+        assert_eq!(check.name, "fuzz::nonexistent_target");
+        assert_eq!(check.verdict, Verdict::Fail);
+        assert_eq!(check.severity, Some(Severity::Critical));
+        assert!(check.has_tag("subprocess"));
+    }
+
+    #[test]
+    fn produce_maps_missing_workdir_to_critical_fail() {
+        let producer =
+            FuzzProducer::new(FuzzRun::new("parse", "0.0.0").in_dir("definitely/not/a/dir/7f3a"));
+        let report = producer.produce();
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.checks[0].verdict, Verdict::Fail);
+        assert!(report.checks[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("does not exist"));
     }
 }

@@ -87,6 +87,7 @@ println!("{}", report.to_json()?);
 | `timeout_per_iter(Duration)`        | libFuzzer's `-timeout=<secs>`.                                  |
 | `rss_limit_mb(u32)`                 | libFuzzer's `-rss_limit_mb=<N>`.                                |
 | `allow(name)` / `allow_all(iter)`   | Suppress findings whose reproducer basename matches.            |
+| `run_timeout(Duration)`             | Hard wall-clock limit for the whole run, build included; kills the process tree. |
 
 ## Budget types
 
@@ -103,11 +104,30 @@ println!("{}", report.to_json()?);
 | `OutOfMemory`     | `Error`                | `Fail`                |
 | `Timeout`         | `Warning`              | `Fail`                |
 
+Findings are read from libFuzzer's stderr. Every `SUMMARY: libFuzzer: ...`
+line (deadly signal / panic, timeout, out-of-memory) and every sanitizer
+`SUMMARY:` line (AddressSanitizer, LeakSanitizer, MemorySanitizer, ...)
+is one finding; its reproducer is the matching `Test unit written to`
+artifact (`crash-*`, `leak-*`, `timeout-*`, `oom-*`). For a Rust panic
+the panic message becomes the finding's `summary`.
+
 Each finding emits a `CheckResult` named
 `fuzz::<target>::<kind-label>` (e.g. `fuzz::parse_input::crash`),
 tagged `fuzz` plus the kind label (`crash` / `timeout` / `oom`).
 The reproducer path rides along as `Evidence::FileRef` with the label
-`"reproducer"`.
+`"reproducer"`. If libFuzzer's output names no artifact for a finding,
+`reproducer_path` is `<unknown reproducer for crash>` (or `timeout` /
+`oom`) and no `FileRef` is attached.
+
+## Budgets and hangs
+
+The `FuzzBudget` is enforced by libFuzzer between inputs and does not
+include building the fuzz target. A single slow input can run for up to
+the per-input timeout (libFuzzer's default is 1200 seconds; set
+`timeout_per_iter` to lower it). `run_timeout` adds a hard backstop:
+when it expires the whole `cargo fuzz` process tree is killed, findings
+already written are kept, and with none `execute()` returns
+`FuzzError::SubprocessFailed`.
 
 ## Allow-listing known false positives
 
@@ -191,7 +211,10 @@ rustup toolchain install nightly      # libFuzzer needs nightly
 ```
 
 The crate detects absence of either and surfaces a typed `FuzzError`
-variant rather than panicking.
+variant rather than panicking: `ToolNotInstalled` when cargo reports no
+`fuzz` subcommand, `NightlyRequired` when `cargo +nightly --version`
+fails (no rustup, or no toolchain named `nightly`; a dated nightly alone
+is not enough because the run uses `cargo +nightly`).
 
 Runtime dependency footprint: `dev-report`, `serde`, `serde_json`.
 
@@ -233,7 +256,7 @@ format.
 
 ## Minimum supported Rust version
 
-`1.85` for this crate. The *user's* fuzz targets require nightly
+`1.75` for this crate. The *user's* fuzz targets require nightly
 Rust because libFuzzer instrumentation is nightly-only — that's a
 property of `cargo-fuzz`, not `dev-fuzz`.
 

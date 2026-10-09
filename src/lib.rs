@@ -35,12 +35,25 @@
 #![warn(missing_docs)]
 #![warn(rust_2018_idioms)]
 
+/// Version of this crate as compiled, taken from its `Cargo.toml`.
+///
+/// Lets tools that bundle this crate, such as the `dev` CLI in
+/// `dev-tools`, report the version that is actually linked.
+///
+/// # Example
+///
+/// ```
+/// assert!(!dev_fuzz::VERSION.is_empty());
+/// ```
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 use std::path::PathBuf;
 use std::time::Duration;
 
 use dev_report::{CheckResult, Evidence, Report, Severity};
 use serde::{Deserialize, Serialize};
 
+mod process;
 mod producer;
 mod runner;
 
@@ -184,6 +197,7 @@ pub struct FuzzRun {
     timeout_per_iter: Option<Duration>,
     rss_limit_mb: Option<u32>,
     allow_list: Vec<String>,
+    run_timeout: Option<Duration>,
 }
 
 impl FuzzRun {
@@ -202,6 +216,7 @@ impl FuzzRun {
             timeout_per_iter: None,
             rss_limit_mb: None,
             allow_list: Vec::new(),
+            run_timeout: None,
         }
     }
 
@@ -228,7 +243,8 @@ impl FuzzRun {
         self
     }
 
-    /// Per-iteration timeout. Translates to libFuzzer's `-timeout=<secs>`.
+    /// Per-iteration timeout. Translates to libFuzzer's `-timeout=<secs>`
+    /// (whole seconds, at least 1). libFuzzer's own default is 1200 s.
     pub fn timeout_per_iter(mut self, d: Duration) -> Self {
         self.timeout_per_iter = Some(d);
         self
@@ -258,6 +274,24 @@ impl FuzzRun {
         S: Into<String>,
     {
         self.allow_list.extend(names.into_iter().map(Into::into));
+        self
+    }
+
+    /// Kill `cargo fuzz` (and every process it started) if the whole run,
+    /// build included, takes longer than `limit`.
+    ///
+    /// The [`FuzzBudget`] is enforced by libFuzzer itself and only
+    /// between inputs, and it does not cover building the target. This
+    /// is a hard backstop on top of it: set it comfortably above the
+    /// budget plus build time. Findings written before the limit expired
+    /// are still returned; with none, [`execute`](Self::execute) returns
+    /// [`FuzzError::SubprocessFailed`] with a message that starts with
+    /// `timed out after`. Default: no limit.
+    ///
+    /// On Unix the child runs in its own process group while a limit is
+    /// set, so that the whole tree can be killed at once.
+    pub fn run_timeout(mut self, limit: Duration) -> Self {
+        self.run_timeout = Some(limit);
         self
     }
 
@@ -303,6 +337,10 @@ impl FuzzRun {
     pub(crate) fn allow_list_view(&self) -> &[String] {
         &self.allow_list
     }
+
+    pub(crate) fn run_timeout_value(&self) -> Option<Duration> {
+        self.run_timeout
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,7 +352,10 @@ impl FuzzRun {
 pub struct FuzzFinding {
     /// Kind of finding (crash / timeout / OOM).
     pub kind: FuzzFindingKind,
-    /// Path to the input that triggered the finding ("reproducer").
+    /// Path to the input that triggered the finding ("reproducer"), as
+    /// printed by libFuzzer. When libFuzzer's output names no artifact
+    /// for the finding this is a placeholder of the form
+    /// `<unknown reproducer for crash>` (it always starts with `<`).
     pub reproducer_path: String,
     /// Short human-readable summary captured from libFuzzer's output.
     pub summary: String,
@@ -359,7 +400,8 @@ impl FuzzResult {
     /// one failing `CheckResult` per finding named
     /// `fuzz::<target>::<kind>` tagged `fuzz` plus a kind-specific tag
     /// (`crash`, `timeout`, `oom`). Each finding's reproducer path
-    /// rides along as `Evidence::FileRef`.
+    /// rides along as `Evidence::FileRef` labelled `reproducer`, unless
+    /// the path is the `<unknown reproducer for ...>` placeholder.
     pub fn into_report(self) -> Report {
         let mut report = Report::new(&self.target, &self.version).with_producer("dev-fuzz");
         if self.findings.is_empty() {
@@ -367,17 +409,25 @@ impl FuzzResult {
                 CheckResult::pass(format!("fuzz::{}", self.target))
                     .with_tag("fuzz")
                     .with_detail(format!("{} executions, 0 findings", self.executions))
-                    .with_evidence(Evidence::numeric_int("executions", self.executions as i64)),
+                    .with_evidence(Evidence::numeric_int(
+                        "executions",
+                        i64::try_from(self.executions).unwrap_or(i64::MAX),
+                    )),
             );
         } else {
             for f in &self.findings {
                 let sev = f.kind.severity();
-                let check =
+                let mut check =
                     CheckResult::fail(format!("fuzz::{}::{}", self.target, f.kind.label()), sev)
                         .with_detail(f.summary.clone())
                         .with_tag("fuzz")
-                        .with_tag(f.kind.label())
-                        .with_evidence(Evidence::file_ref("reproducer", &f.reproducer_path));
+                        .with_tag(f.kind.label());
+                // A placeholder such as `<unknown reproducer for crash>` is
+                // not a file; keep it out of FileRef (and SARIF locations).
+                if !f.reproducer_path.starts_with('<') {
+                    check =
+                        check.with_evidence(Evidence::file_ref("reproducer", &f.reproducer_path));
+                }
                 report.push(check);
             }
         }
@@ -505,6 +555,49 @@ mod tests {
         let c = &report.checks[0];
         assert!(c.has_tag("fuzz"));
         assert!(c.evidence.iter().any(|e| e.label == "executions"));
+    }
+
+    #[test]
+    fn unknown_reproducer_is_not_a_file_ref() {
+        let r = FuzzResult {
+            target: "parse".into(),
+            version: "0.1.0".into(),
+            executions: 1,
+            findings: vec![FuzzFinding {
+                kind: FuzzFindingKind::Crash,
+                reproducer_path: "<unknown reproducer for crash>".into(),
+                summary: "SUMMARY: ThreadSanitizer: data race".into(),
+            }],
+        };
+        let report = r.into_report();
+        assert!(report.failed());
+        assert!(report.checks[0].evidence.is_empty());
+    }
+
+    #[test]
+    fn huge_execution_count_is_clamped_in_evidence() {
+        let r = FuzzResult {
+            target: "parse".into(),
+            version: "0.1.0".into(),
+            executions: u64::MAX,
+            findings: Vec::new(),
+        };
+        let report = r.into_report();
+        let e = &report.checks[0].evidence[0];
+        assert_eq!(e.label, "executions");
+        match &e.data {
+            dev_report::EvidenceData::Numeric(v) => {
+                assert!(*v > 0.0, "executions must not wrap negative: {v}")
+            }
+            other => panic!("unexpected evidence {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_timeout_is_recorded() {
+        let run = FuzzRun::new("parse", "0.1.0").run_timeout(Duration::from_secs(900));
+        assert_eq!(run.run_timeout_value(), Some(Duration::from_secs(900)));
+        assert_eq!(FuzzRun::new("parse", "0.1.0").run_timeout_value(), None);
     }
 
     #[test]
