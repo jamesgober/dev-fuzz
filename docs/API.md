@@ -210,7 +210,8 @@ pub fn into_report(self) -> Report
 Convert this result into a `dev-report::Report`. Empty findings
 produces a passing `fuzz::<target>` check with execution count
 attached as `Evidence::Numeric`. Each finding produces a separate
-fail-verdict check with the reproducer attached as
+fail-verdict check named `fuzz::<target>::<kind>::<id>` (see
+`FuzzFinding::check_name`) with the reproducer attached as
 `Evidence::FileRef`.
 
 ---

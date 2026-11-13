@@ -361,6 +361,60 @@ pub struct FuzzFinding {
     pub summary: String,
 }
 
+impl FuzzFinding {
+    /// Name of the [`CheckResult`] this finding becomes in
+    /// [`FuzzResult::into_report`]: `fuzz::<target>::<kind>::<id>`.
+    ///
+    /// `<id>` is the file name of the reproducer (for example
+    /// `crash-da39a3ee5e6b4b0d3255bfef95601890afd80709`, which libFuzzer
+    /// derives from the input's hash). When libFuzzer named no
+    /// reproducer, `<id>` is `summary-` plus a 16-digit hex hash of the
+    /// summary. Either way the same finding keeps its name between
+    /// runs, and two different findings of one kind get different
+    /// names, so `Report::diff` can tell them apart.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use dev_fuzz::{FuzzFinding, FuzzFindingKind};
+    ///
+    /// let f = FuzzFinding {
+    ///     kind: FuzzFindingKind::Crash,
+    ///     reproducer_path: "fuzz/artifacts/parse/crash-abc123".into(),
+    ///     summary: "SUMMARY: libFuzzer: deadly signal".into(),
+    /// };
+    /// assert_eq!(f.check_name("parse"), "fuzz::parse::crash::crash-abc123");
+    /// ```
+    pub fn check_name(&self, target: &str) -> String {
+        let id = if self.reproducer_path.starts_with('<') {
+            format!("summary-{:016x}", fnv1a64(self.summary.as_bytes()))
+        } else {
+            let base = self
+                .reproducer_path
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(&self.reproducer_path);
+            if base.is_empty() {
+                format!("summary-{:016x}", fnv1a64(self.reproducer_path.as_bytes()))
+            } else {
+                base.to_string()
+            }
+        };
+        format!("fuzz::{target}::{}::{id}", self.kind.label())
+    }
+}
+
+/// 64-bit FNV-1a. Stable across platforms and releases, which is all a
+/// check name needs.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
 /// Result of a fuzz run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FuzzResult {
@@ -397,11 +451,15 @@ impl FuzzResult {
     ///
     /// No findings → one passing `CheckResult` named
     /// `fuzz::<target>` with `executions` numeric evidence. Otherwise
-    /// one failing `CheckResult` per finding named
-    /// `fuzz::<target>::<kind>` tagged `fuzz` plus a kind-specific tag
-    /// (`crash`, `timeout`, `oom`). Each finding's reproducer path
-    /// rides along as `Evidence::FileRef` labelled `reproducer`, unless
-    /// the path is the `<unknown reproducer for ...>` placeholder.
+    /// one failing `CheckResult` per finding, named by
+    /// [`FuzzFinding::check_name`] (`fuzz::<target>::<kind>::<id>`) and
+    /// tagged `fuzz` plus a kind-specific tag (`crash`, `timeout`,
+    /// `oom`). Each finding's reproducer path rides along as
+    /// `Evidence::FileRef` labelled `reproducer`, unless the path is the
+    /// `<unknown reproducer for ...>` placeholder.
+    ///
+    /// Names are unique within the report: if two findings would get
+    /// the same name, the later ones get `#2`, `#3`, ... appended.
     pub fn into_report(self) -> Report {
         let mut report = Report::new(&self.target, &self.version).with_producer("dev-fuzz");
         if self.findings.is_empty() {
@@ -415,13 +473,18 @@ impl FuzzResult {
                     )),
             );
         } else {
+            let mut seen: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
             for f in &self.findings {
                 let sev = f.kind.severity();
-                let mut check =
-                    CheckResult::fail(format!("fuzz::{}::{}", self.target, f.kind.label()), sev)
-                        .with_detail(f.summary.clone())
-                        .with_tag("fuzz")
-                        .with_tag(f.kind.label());
+                let base = f.check_name(&self.target);
+                let n = seen.entry(base.clone()).or_insert(0);
+                *n += 1;
+                let name = if *n == 1 { base } else { format!("{base}#{n}") };
+                let mut check = CheckResult::fail(name, sev)
+                    .with_detail(f.summary.clone())
+                    .with_tag("fuzz")
+                    .with_tag(f.kind.label());
                 // A placeholder such as `<unknown reproducer for crash>` is
                 // not a file; keep it out of FileRef (and SARIF locations).
                 if !f.reproducer_path.starts_with('<') {
@@ -572,6 +635,88 @@ mod tests {
         let report = r.into_report();
         assert!(report.failed());
         assert!(report.checks[0].evidence.is_empty());
+    }
+
+    fn crash(path: &str, summary: &str) -> FuzzFinding {
+        FuzzFinding {
+            kind: FuzzFindingKind::Crash,
+            reproducer_path: path.into(),
+            summary: summary.into(),
+        }
+    }
+
+    #[test]
+    fn each_crash_gets_its_own_check_name() {
+        let r = FuzzResult {
+            target: "parse".into(),
+            version: "0.1.0".into(),
+            executions: 10,
+            findings: vec![
+                crash("fuzz/artifacts/parse/crash-aaa", "deadly signal"),
+                crash(r"fuzz\artifacts\parse\crash-bbb", "heap-buffer-overflow"),
+                crash("<unknown reproducer for crash>", "data race"),
+                crash("<unknown reproducer for crash>", "use after free"),
+            ],
+        };
+        let report = r.into_report();
+        let names: Vec<&str> = report.checks.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names[0], "fuzz::parse::crash::crash-aaa");
+        assert_eq!(names[1], "fuzz::parse::crash::crash-bbb");
+        assert!(names[2].starts_with("fuzz::parse::crash::summary-"));
+        assert_ne!(names[2], names[3]);
+        assert!(report.duplicate_names().is_empty(), "{names:?}");
+    }
+
+    #[test]
+    fn new_crash_shows_in_diff_against_a_baseline_with_one_crash() {
+        let known = crash("fuzz/artifacts/parse/crash-aaa", "deadly signal");
+        let baseline = FuzzResult {
+            target: "parse".into(),
+            version: "0.1.0".into(),
+            executions: 10,
+            findings: vec![known.clone()],
+        }
+        .into_report();
+        let current = FuzzResult {
+            target: "parse".into(),
+            version: "0.1.0".into(),
+            executions: 10,
+            findings: vec![
+                known,
+                crash("fuzz/artifacts/parse/crash-ccc", "heap overflow"),
+            ],
+        }
+        .into_report();
+        let diff = current.diff(&baseline);
+        assert_eq!(
+            diff.newly_failing,
+            vec!["fuzz::parse::crash::crash-ccc".to_string()]
+        );
+    }
+
+    #[test]
+    fn identical_findings_get_numbered_names() {
+        let f = crash("fuzz/artifacts/parse/crash-aaa", "x");
+        let report = FuzzResult {
+            target: "parse".into(),
+            version: "0.1.0".into(),
+            executions: 1,
+            findings: vec![f.clone(), f],
+        }
+        .into_report();
+        assert_eq!(report.checks[1].name, "fuzz::parse::crash::crash-aaa#2");
+    }
+
+    #[test]
+    fn check_name_is_stable() {
+        let f = crash(
+            "<unknown reproducer for crash>",
+            "SUMMARY: ThreadSanitizer: data race",
+        );
+        assert_eq!(f.check_name("t"), f.clone().check_name("t"));
+        // FNV-1a of the empty input is the offset basis.
+        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
 
     #[test]

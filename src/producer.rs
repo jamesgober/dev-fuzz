@@ -45,7 +45,7 @@ impl Producer for FuzzProducer {
     fn produce(&self) -> Report {
         let target = self.run.target_name().to_string();
         let version = self.run.subject_version().to_string();
-        let mut report = Report::new(&target, &version).with_producer("dev-fuzz");
+        let mut report = Report::new(target.as_str(), version.as_str()).with_producer("dev-fuzz");
         match self.run.execute() {
             Ok(result) => {
                 let r = result.into_report();

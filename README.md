@@ -53,7 +53,7 @@ inputs through the target.
 
 ```toml
 [dependencies]
-dev-fuzz = "0.9"
+dev-fuzz = "0.10"
 ```
 
 One-time tool install:
@@ -112,8 +112,13 @@ artifact (`crash-*`, `leak-*`, `timeout-*`, `oom-*`). For a Rust panic
 the panic message becomes the finding's `summary`.
 
 Each finding emits a `CheckResult` named
-`fuzz::<target>::<kind-label>` (e.g. `fuzz::parse_input::crash`),
-tagged `fuzz` plus the kind label (`crash` / `timeout` / `oom`).
+`fuzz::<target>::<kind-label>::<id>`, tagged `fuzz` plus the kind label
+(`crash` / `timeout` / `oom`). `<id>` is the reproducer's file name
+(e.g. `fuzz::parse_input::crash::crash-da39a3ee...`), or `summary-` and a
+hash of the summary when there is no reproducer. Every finding gets its
+own name, and the same finding keeps it between runs, so
+`Report::diff` sees a new crash even when the baseline already had one.
+`FuzzFinding::check_name` returns the name.
 The reproducer path rides along as `Evidence::FileRef` with the label
 `"reproducer"`. If libFuzzer's output names no artifact for a finding,
 `reproducer_path` is `<unknown reproducer for crash>` (or `timeout` /

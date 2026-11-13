@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-12
+
+Each finding gets its own check name.
+
+### Breaking
+
+- **Check names now identify the finding.** A finding's check is named
+  `fuzz::<target>::<kind>::<id>`, where `<id>` is the reproducer's file
+  name, or `summary-` plus a hash of the summary when libFuzzer named
+  no reproducer. Before, every crash of a target was
+  `fuzz::<target>::crash`, so `Report::diff` could not see a new crash
+  when the baseline already held one. Tooling or stored baselines that
+  match on the old names need updating once.
+
+### Added
+
+- `FuzzFinding::check_name(target)` returns the name a finding gets in
+  the report.
+
+### Changed
+
+- Depends on `dev-report` 0.9.9 from crates.io instead of a sibling
+  checkout.
+
+[0.10.0]: https://github.com/jamesgober/dev-fuzz/releases/tag/v0.10.0
+
 ## [0.9.2] - 2026-10-09
 
 Finding-detection fixes from a review pass, a hard run time limit, and
