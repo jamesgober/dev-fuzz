@@ -681,9 +681,13 @@ mod tests {
 
     /// `    #N 0x... in frame_N` lines, the way sanitizers print stacks.
     fn stack(frames: usize) -> String {
-        (0..frames)
-            .map(|n| format!("    #{n} 0x55f1c0bd{n:04x} in frame_{n} /src/x.rs:{n}:1\n"))
-            .collect()
+        let mut out = String::new();
+        for n in 0..frames {
+            out.push_str(&format!(
+                "    #{n} 0x55f1c0bd{n:04x} in frame_{n} /src/x.rs:{n}:1\n"
+            ));
+        }
+        out
     }
 
     fn rust_panic_crash() -> String {
